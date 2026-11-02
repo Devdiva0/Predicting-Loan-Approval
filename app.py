@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 import os
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
@@ -451,10 +452,82 @@ with tab1:
 # TAB 2 — VISUALIZATIONS
 # ────────────────────────────────────────────────────
 with tab2:
+    # ── Matplotlib Charts (same as loan_approval_spark.py output) ─────
+    r = results
+    tn, fp, fn, tp = r["tn"], r["fp"], r["fn"], r["tp"]
+
+    st.markdown('<div class="section-title">Confusion Matrix Heatmap</div>', unsafe_allow_html=True)
+    spark_1, spark_2 = st.columns(2)
+
+    with spark_1:
+        fig_cm, ax_cm = plt.subplots(figsize=(5, 4))
+        fig_cm.patch.set_facecolor("#1a2540")
+        ax_cm.set_facecolor("#1a2540")
+        cm_data = [[tn, fp], [fn, tp]]
+        ax_cm.imshow(cm_data, cmap="Blues")
+        for i, row in enumerate(cm_data):
+            for j, value in enumerate(row):
+                ax_cm.text(j, i, str(value), ha="center", va="center",
+                           fontsize=18, fontweight="bold", color="white")
+        ax_cm.set_xticks([0, 1])
+        ax_cm.set_xticklabels(["Rejected", "Approved"], color="#94a3b8")
+        ax_cm.set_yticks([0, 1])
+        ax_cm.set_yticklabels(["Rejected", "Approved"], color="#94a3b8")
+        ax_cm.set_xlabel("Predicted", color="#e2e8f0", fontsize=12)
+        ax_cm.set_ylabel("Actual", color="#e2e8f0", fontsize=12)
+        ax_cm.set_title("Loan Approval Confusion Matrix", color="#e2e8f0", fontsize=13, pad=12)
+        ax_cm.tick_params(colors="#94a3b8")
+        fig_cm.tight_layout()
+        st.pyplot(fig_cm)
+        plt.close(fig_cm)
+
+    with spark_2:
+        st.markdown('<div class="section-title">Approval Rate by Income Group</div>', unsafe_allow_html=True)
+        income_df_mpl = df.copy()
+        income_df_mpl["income_group"] = pd.cut(
+            income_df_mpl["income_annum"],
+            bins=[0, 2_500_000, 5_000_000, float("inf")],
+            labels=["Low Income", "Middle Income", "High Income"]
+        )
+        approval_mpl = (
+            income_df_mpl.groupby("income_group", observed=True)
+            .apply(lambda x: (x["loan_status"] == "Approved").mean() * 100)
+            .reset_index(name="approval_rate")
+        )
+        fig_inc, ax_inc = plt.subplots(figsize=(7, 5))
+        fig_inc.patch.set_facecolor("#1a2540")
+        ax_inc.set_facecolor("#1a2540")
+        bars = ax_inc.bar(
+            approval_mpl["income_group"],
+            approval_mpl["approval_rate"],
+            color=["#f87171", "#fbbf24", "#34d399"],
+            edgecolor="none",
+            width=0.55
+        )
+        for bar in bars:
+            h = bar.get_height()
+            ax_inc.text(bar.get_x() + bar.get_width() / 2, h + 1.5,
+                        f"{h:.1f}%", ha="center", va="bottom",
+                        color="#e2e8f0", fontweight="bold", fontsize=12)
+        ax_inc.set_xlabel("Income Group", color="#e2e8f0", fontsize=12)
+        ax_inc.set_ylabel("Approval Rate (%)", color="#e2e8f0", fontsize=12)
+        ax_inc.set_title("Loan Approval Rate by Income Group", color="#e2e8f0", fontsize=13, pad=12)
+        ax_inc.set_ylim(0, 100)
+        ax_inc.tick_params(colors="#94a3b8")
+        ax_inc.spines["top"].set_visible(False)
+        ax_inc.spines["right"].set_visible(False)
+        ax_inc.spines["left"].set_color("#243057")
+        ax_inc.spines["bottom"].set_color("#243057")
+        fig_inc.tight_layout()
+        st.pyplot(fig_inc)
+        plt.close(fig_inc)
+
+    st.markdown("---")
+
     try:
         import plotly.express as px
 
-        st.markdown('<div class="section-title">Dataset Visualizations</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Interactive Visualizations</div>', unsafe_allow_html=True)
 
         d1, d2 = st.columns(2)
 
