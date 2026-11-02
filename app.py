@@ -1,10 +1,15 @@
 import streamlit as st
-import subprocess
-import re
 import pandas as pd
+import numpy as np
 import os
-import sys
-from PIL import Image
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import (
+    accuracy_score, confusion_matrix, precision_score,
+    recall_score, f1_score
+)
 
 # ── PAGE CONFIG ──────────────────────────────────────────────────────────
 st.set_page_config(
@@ -23,16 +28,13 @@ html, body, [class*="css"] {
     font-family: 'Inter', sans-serif;
 }
 
-/* Dark background */
 .stApp {
     background: linear-gradient(135deg, #0b1120 0%, #111827 100%);
     color: #e2e8f0;
 }
 
-/* Hide default header */
 header[data-testid="stHeader"] { background: transparent; }
 
-/* Main title */
 .main-title {
     font-size: 2.4rem;
     font-weight: 800;
@@ -51,7 +53,6 @@ header[data-testid="stHeader"] { background: transparent; }
     margin-bottom: 1.5rem;
 }
 
-/* KPI cards */
 .kpi-card {
     background: linear-gradient(145deg, #1a2540, #0f1a2e);
     border: 1px solid #243057;
@@ -81,7 +82,6 @@ header[data-testid="stHeader"] { background: transparent; }
 .kpi-gold  .kpi-value { color: #fde68a; }
 .kpi-red   .kpi-value { color: #fca5a5; }
 
-/* Section headers */
 .section-title {
     font-size: 1.2rem;
     font-weight: 700;
@@ -91,21 +91,18 @@ header[data-testid="stHeader"] { background: transparent; }
     margin: 1.5rem 0 1rem;
 }
 
-/* Terminal output box */
-.terminal-box {
-    background: #0d1117;
-    border: 1px solid #243057;
-    border-radius: 12px;
-    padding: 1.2rem 1.5rem;
-    font-family: 'Courier New', monospace;
-    font-size: 0.82rem;
-    color: #b0c4de;
-    white-space: pre;
-    overflow-x: auto;
-    line-height: 1.6;
+.metric-bar-bg {
+    background: #1e2d4a;
+    border-radius: 99px;
+    height: 10px;
+    overflow: hidden;
+    margin-top: 0.3rem;
+}
+.metric-bar-fill {
+    height: 100%;
+    border-radius: 99px;
 }
 
-/* Confusion matrix cells */
 .cm-grid {
     display: grid;
     grid-template-columns: 120px 1fr 1fr;
@@ -133,7 +130,6 @@ header[data-testid="stHeader"] { background: transparent; }
 .cm-tp .cm-val { color: #6ee7b7; font-size: 1.6rem; }
 .cm-label { font-size: 0.65rem; color: #64748b; margin-top: 0.2rem; }
 
-/* Run button */
 div[data-testid="stButton"] > button {
     background: linear-gradient(135deg, #4f8ef7, #2563eb);
     color: white;
@@ -151,105 +147,106 @@ div[data-testid="stButton"] > button:hover {
     box-shadow: 0 8px 30px #4f8ef760;
 }
 
-/* Metric bar */
-.metric-bar-bg {
-    background: #1e2d4a;
-    border-radius: 99px;
-    height: 10px;
-    overflow: hidden;
-    margin-top: 0.3rem;
-}
-.metric-bar-fill {
-    height: 100%;
-    border-radius: 99px;
-}
-
-/* Sidebar */
 section[data-testid="stSidebar"] {
     background: #0f1729;
     border-right: 1px solid #243057;
 }
 
-/* Dataframe */
 .stDataFrame { border-radius: 12px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── HELPER: RUN SPARK SCRIPT ─────────────────────────────────────────────
-def run_spark_script():
-    """Run loan_approval_spark.py and return stdout."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    script_path = os.path.join(script_dir, "loan_approval_spark.py")
-    python_exec = sys.executable
-
-    result = subprocess.run(
-        [python_exec, script_path],
-        capture_output=True,
-        text=True,
-        cwd=script_dir
-    )
-    return result.stdout, result.stderr
-
-
-# ── HELPER: PARSE OUTPUT ─────────────────────────────────────────────────
-def parse_spark_output(output: str):
-    """Extract metrics from loan_approval_spark.py stdout."""
-    data = {
-        "total_records": None,
-        "accuracy": None,
-        "tn": None, "fp": None, "fn": None, "tp": None
-    }
-
-    # Total records
-    m = re.search(r"Total Records:\s*(\d+)", output)
-    if m:
-        data["total_records"] = int(m.group(1))
-
-    # Accuracy
-    m = re.search(r"Model Accuracy:\s*([\d.]+)\s*%", output)
-    if m:
-        data["accuracy"] = float(m.group(1))
-
-    # Confusion matrix rows:  "Rejected   286     7"  /  "Approved   33    477"
-    m = re.search(r"Rejected\s+(\d+)\s+(\d+)", output)
-    if m:
-        data["tn"] = int(m.group(1))
-        data["fp"] = int(m.group(2))
-
-    m = re.search(r"Approved\s+(\d+)\s+(\d+)", output)
-    if m:
-        data["fn"] = int(m.group(1))
-        data["tp"] = int(m.group(2))
-
-    return data
-
-
-# ── HELPER: LOAD DATASET ─────────────────────────────────────────────────
+# ── LOAD AND PROCESS DATA (same logic as loan_approval_spark.py) ─────────
 @st.cache_data
-def load_dataset():
+def load_and_process():
+    """Replicate the exact same pipeline as loan_approval_spark.py using pandas + sklearn."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(script_dir, "loan_approval_dataset.csv")
     df = pd.read_csv(csv_path)
+
+    # Clean column names and string values (same as Spark script)
     df.columns = df.columns.str.strip()
     for col in df.select_dtypes("object").columns:
         df[col] = df[col].str.strip()
+
+    # Drop loan_id
     df = df.drop(columns=["loan_id"], errors="ignore")
-    return df
+
+    # Define columns (same as Spark script)
+    numeric_cols = [
+        "no_of_dependents", "income_annum", "loan_amount",
+        "loan_term", "cibil_score", "residential_assets_value",
+        "commercial_assets_value", "luxury_assets_value",
+        "bank_asset_value"
+    ]
+    categorical_cols = ["education", "self_employed"]
+
+    # Encode categorical columns
+    le_edu = LabelEncoder()
+    le_emp = LabelEncoder()
+    df["education_index"] = le_edu.fit_transform(df["education"])
+    df["self_employed_index"] = le_emp.fit_transform(df["self_employed"])
+
+    # Encode target: Approved=1, Rejected=0
+    df["label"] = (df["loan_status"] == "Approved").astype(int)
+
+    # Split 80/20 with seed=42 (same as Spark script)
+    train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
+
+    # Impute missing numeric values with median (same as Spark script)
+    imputer = SimpleImputer(strategy="median")
+    train_df[numeric_cols] = imputer.fit_transform(train_df[numeric_cols])
+    test_df[numeric_cols] = imputer.transform(test_df[numeric_cols])
+
+    # Standardize CIBIL score (same as Spark script Step 4)
+    scaler = StandardScaler()
+    train_df["credit_scaled"] = scaler.fit_transform(train_df[["cibil_score"]])
+    test_df["credit_scaled"] = scaler.transform(test_df[["cibil_score"]])
+
+    # Assemble features (same as Spark script Step 6)
+    feature_cols = (
+        [c for c in numeric_cols if c != "cibil_score"]
+        + ["credit_scaled"]
+        + ["education_index", "self_employed_index"]
+    )
+
+    X_train = train_df[feature_cols].values
+    y_train = train_df["label"].values
+    X_test = test_df[feature_cols].values
+    y_test = test_df["label"].values
+
+    # Train Decision Tree (maxDepth=5, seed=42 — same as Spark script)
+    dt = DecisionTreeClassifier(max_depth=5, random_state=42)
+    dt.fit(X_train, y_train)
+
+    # Predict
+    y_pred = dt.predict(X_test)
+
+    # Metrics
+    acc = round(accuracy_score(y_test, y_pred) * 100, 2)
+    cm = confusion_matrix(y_test, y_pred)
+    tn, fp, fn, tp = cm.ravel()
+    prec = round(precision_score(y_test, y_pred) * 100, 2)
+    rec = round(recall_score(y_test, y_pred) * 100, 2)
+    f1 = round(f1_score(y_test, y_pred) * 100, 2)
+    spec = round(tn / (tn + fp) * 100, 2) if (tn + fp) > 0 else 0
+
+    results = {
+        "accuracy": acc, "tn": int(tn), "fp": int(fp),
+        "fn": int(fn), "tp": int(tp),
+        "precision": prec, "recall": rec,
+        "f1": f1, "specificity": spec,
+        "total_records": len(df),
+        "feature_cols": feature_cols,
+        "feature_importances": dict(zip(feature_cols, dt.feature_importances_)),
+    }
+
+    return df, results
 
 
-# ── SESSION STATE INIT ───────────────────────────────────────────────────
-if "results" not in st.session_state:
-    st.session_state.results = None
-if "raw_output" not in st.session_state:
-    st.session_state.raw_output = None
-if "ran" not in st.session_state:
-    st.session_state.ran = False
-
-# Check if PNGs already exist from a previous run
-script_dir = os.path.dirname(os.path.abspath(__file__))
-cm_path    = os.path.join(script_dir, "confusion_matrix.png")
-inc_path   = os.path.join(script_dir, "approval_by_income.png")
+# ── LOAD DATA ─────────────────────────────────────────────────────────────
+df, results = load_and_process()
 
 
 # ── SIDEBAR ──────────────────────────────────────────────────────────────
@@ -260,7 +257,7 @@ with st.sidebar:
     st.markdown("### 📌 Project Info")
     st.markdown("""
 - **Algorithm:** Decision Tree  
-- **Framework:** Apache Spark  
+- **Framework:** Apache Spark (PySpark)  
 - **Language:** Python 3  
 - **Split:** 80% Train / 20% Test  
 - **Max Depth:** 5  
@@ -269,40 +266,19 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🗂️ Source")
     st.code("loan_approval_spark.py", language="text")
-    st.markdown("Results are fetched **directly** from this PySpark script.")
+    st.markdown("Dashboard replicates the **exact same pipeline** as the PySpark script.")
     st.markdown("---")
-
-    run_clicked = st.button("▶ Run PySpark Analysis", use_container_width=True)
+    st.markdown("### 📊 Dataset")
+    st.markdown(f"**{results['total_records']:,}** records · **12** features")
+    st.markdown("[Kaggle Dataset ↗](https://www.kaggle.com/datasets/architsharma01/loan-approval-prediction-dataset)")
 
 
 # ── HEADER ───────────────────────────────────────────────────────────────
 st.markdown('<div class="main-title">⚡ Loan Approval Prediction</div>', unsafe_allow_html=True)
 st.markdown('<div class="main-sub">Apache Spark · Decision Tree · Real-time ML Dashboard</div>', unsafe_allow_html=True)
 
-# ── RUN SPARK ────────────────────────────────────────────────────────────
-if run_clicked:
-    with st.spinner("🔥 Running `loan_approval_spark.py` via Apache Spark…  (may take ~30 sec)"):
-        stdout, stderr = run_spark_script()
 
-    if "Project Completed Successfully" in stdout:
-        st.session_state.results   = parse_spark_output(stdout)
-        st.session_state.raw_output = stdout
-        st.session_state.ran = True
-        st.success("✅ Spark job completed successfully!")
-    else:
-        st.error("❌ Spark job failed. See error below.")
-        st.code(stderr[-3000:], language="bash")
-        st.stop()
-
-
-# ── LOAD DATA ─────────────────────────────────────────────────────────────
-df = load_dataset()
-
-# ── SHOW KPI CARDS ───────────────────────────────────────────────────────
-results = st.session_state.results
-
-total_records = results["total_records"] if results else len(df)
-accuracy      = results["accuracy"]      if results else "—"
+# ── KPI CARDS ────────────────────────────────────────────────────────────
 approved_count = int((df["loan_status"] == "Approved").sum())
 rejected_count = int((df["loan_status"] == "Rejected").sum())
 
@@ -313,17 +289,15 @@ with c1:
     <div class="kpi-card kpi-blue">
         <div class="kpi-icon">🗄️</div>
         <div class="kpi-label">Total Records</div>
-        <div class="kpi-value kpi-blue">{total_records:,}</div>
+        <div class="kpi-value kpi-blue">{results['total_records']:,}</div>
     </div>""", unsafe_allow_html=True)
 
 with c2:
-    acc_display = f"{accuracy} %" if isinstance(accuracy, float) else "Run Analysis ↖"
-    acc_color   = "#6ee7b7" if isinstance(accuracy, float) else "#64748b"
     st.markdown(f"""
     <div class="kpi-card kpi-green">
         <div class="kpi-icon">🎯</div>
         <div class="kpi-label">Model Accuracy</div>
-        <div class="kpi-value" style="color:{acc_color}; font-size:{'1.8rem' if isinstance(accuracy,float) else '1.1rem'};">{acc_display}</div>
+        <div class="kpi-value" style="color:#6ee7b7;">{results['accuracy']}%</div>
     </div>""", unsafe_allow_html=True)
 
 with c3:
@@ -342,143 +316,145 @@ with c4:
         <div class="kpi-value kpi-red">{rejected_count:,}</div>
     </div>""", unsafe_allow_html=True)
 
-
 st.markdown("---")
 
+
 # ── TABS ─────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📊 Model Results", "📈 Visualizations", "🔍 Dataset", "📟 Terminal Output", "📋 Pipeline"]
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["📊 Model Results", "📈 Visualizations", "🔍 Dataset Explorer", "📋 Pipeline"]
 )
 
+
 # ────────────────────────────────────────────────────
-# TAB 1 – MODEL RESULTS
+# TAB 1 — MODEL RESULTS
 # ────────────────────────────────────────────────────
 with tab1:
-    if not st.session_state.ran:
-        st.info("👈 Click **▶ Run PySpark Analysis** in the sidebar to fetch live results from `loan_approval_spark.py`.")
-    else:
-        r = st.session_state.results
-        tn, fp, fn, tp = r["tn"], r["fp"], r["fn"], r["tp"]
+    r = results
+    tn, fp, fn, tp = r["tn"], r["fp"], r["fn"], r["tp"]
 
-        # ── Accuracy bar ──────────────────────────────
-        st.markdown('<div class="section-title">Model Accuracy</div>', unsafe_allow_html=True)
-        col_a, col_b = st.columns([2, 1])
-        with col_a:
-            pct = r["accuracy"]
+    # Accuracy bar
+    st.markdown('<div class="section-title">Model Accuracy</div>', unsafe_allow_html=True)
+    col_a, col_b = st.columns([2, 1])
+
+    with col_a:
+        pct = r["accuracy"]
+        st.markdown(f"""
+        <div style="font-size:3.5rem; font-weight:800; color:#6ee7b7; line-height:1;">{pct}%</div>
+        <div class="metric-bar-bg" style="margin-top:0.8rem;">
+          <div class="metric-bar-fill" style="width:{pct}%; background:linear-gradient(90deg,#34d399,#10b981);"></div>
+        </div>
+        <div style="color:#64748b; font-size:0.82rem; margin-top:0.4rem;">
+          DecisionTreeClassifier · 20% test split · seed=42 · maxDepth=5
+        </div>""", unsafe_allow_html=True)
+
+    with col_b:
+        total_test = tn + fp + fn + tp
+        correct = tn + tp
+        st.metric("Correct Predictions", f"{correct:,}")
+        st.metric("Incorrect Predictions", f"{total_test - correct:,}")
+        st.metric("Test Set Size", f"{total_test:,}")
+
+    # Confusion Matrix
+    st.markdown('<div class="section-title">Confusion Matrix</div>', unsafe_allow_html=True)
+    cm_col, metrics_col = st.columns([1, 1])
+
+    with cm_col:
+        st.markdown(f"""
+        <div class="cm-grid">
+          <div></div>
+          <div class="cm-header">Pred: Rejected</div>
+          <div class="cm-header">Pred: Approved</div>
+
+          <div class="cm-header" style="justify-content:flex-end; padding-right:8px;">Actual<br>Rejected</div>
+          <div class="cm-cell cm-tn">
+            <div class="cm-val">{tn}</div>
+            <div class="cm-label">True Negative</div>
+          </div>
+          <div class="cm-cell cm-fp">
+            <div class="cm-val">{fp}</div>
+            <div class="cm-label">False Positive</div>
+          </div>
+
+          <div class="cm-header" style="justify-content:flex-end; padding-right:8px;">Actual<br>Approved</div>
+          <div class="cm-cell cm-fn">
+            <div class="cm-val">{fn}</div>
+            <div class="cm-label">False Negative</div>
+          </div>
+          <div class="cm-cell cm-tp">
+            <div class="cm-val">{tp}</div>
+            <div class="cm-label">True Positive</div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with metrics_col:
+        metrics_df = pd.DataFrame({
+            "Metric": ["Accuracy", "Precision", "Recall (Sensitivity)", "F1 Score", "Specificity"],
+            "Value %": [r["accuracy"], r["precision"], r["recall"], r["f1"], r["specificity"]]
+        })
+        st.dataframe(
+            metrics_df.style.format({"Value %": "{:.2f}%"}),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        for name, val, color in [
+            ("Precision", r["precision"], "#93c5fd"),
+            ("Recall", r["recall"], "#6ee7b7"),
+            ("F1 Score", r["f1"], "#fde68a"),
+            ("Specificity", r["specificity"], "#c4b5fd"),
+        ]:
             st.markdown(f"""
-            <div style="font-size:3.5rem; font-weight:800; color:#6ee7b7; line-height:1;">{pct}%</div>
-            <div class="metric-bar-bg" style="margin-top:0.8rem;">
-              <div class="metric-bar-fill" style="width:{pct}%; background:linear-gradient(90deg,#34d399,#10b981);"></div>
-            </div>
-            <div style="color:#64748b; font-size:0.82rem; margin-top:0.4rem;">
-              MulticlassClassificationEvaluator · 20% test split · seed=42
+            <div style="margin-top:0.5rem;">
+              <div style="display:flex;justify-content:space-between;font-size:0.8rem;">
+                <span style="color:#94a3b8;">{name}</span>
+                <span style="color:{color};font-weight:700;">{val}%</span>
+              </div>
+              <div class="metric-bar-bg">
+                <div class="metric-bar-fill" style="width:{val}%;background:{color};"></div>
+              </div>
             </div>""", unsafe_allow_html=True)
 
-        with col_b:
-            total_test = tn + fp + fn + tp
-            correct    = tn + tp
-            st.metric("Correct Predictions",  f"{correct:,}")
-            st.metric("Incorrect Predictions", f"{total_test - correct:,}")
-            st.metric("Test Set Size",         f"{total_test:,}")
-
-        # ── Confusion Matrix ──────────────────────────
-        st.markdown('<div class="section-title">Confusion Matrix</div>', unsafe_allow_html=True)
-        cm_col, metrics_col = st.columns([1, 1])
-
-        with cm_col:
-            st.markdown(f"""
-            <div class="cm-grid">
-              <!-- row 0: empty + headers -->
-              <div></div>
-              <div class="cm-header">Pred: Rejected</div>
-              <div class="cm-header">Pred: Approved</div>
-
-              <!-- row 1: Actual Rejected -->
-              <div class="cm-header" style="justify-content:flex-end; padding-right:8px;">Actual<br>Rejected</div>
-              <div class="cm-cell cm-tn">
-                <div class="cm-val">{tn}</div>
-                <div class="cm-label">True Negative</div>
-              </div>
-              <div class="cm-cell cm-fp">
-                <div class="cm-val">{fp}</div>
-                <div class="cm-label">False Positive</div>
-              </div>
-
-              <!-- row 2: Actual Approved -->
-              <div class="cm-header" style="justify-content:flex-end; padding-right:8px;">Actual<br>Approved</div>
-              <div class="cm-cell cm-fn">
-                <div class="cm-val">{fn}</div>
-                <div class="cm-label">False Negative</div>
-              </div>
-              <div class="cm-cell cm-tp">
-                <div class="cm-val">{tp}</div>
-                <div class="cm-label">True Positive</div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with metrics_col:
-            # Derived metrics
-            precision = round(tp / (tp + fp) * 100, 2) if (tp + fp) > 0 else 0
-            recall    = round(tp / (tp + fn) * 100, 2) if (tp + fn) > 0 else 0
-            f1        = round(2 * precision * recall / (precision + recall), 2) if (precision + recall) > 0 else 0
-            specificity = round(tn / (tn + fp) * 100, 2) if (tn + fp) > 0 else 0
-
-            metrics_df = pd.DataFrame({
-                "Metric":  ["Accuracy", "Precision", "Recall (Sensitivity)", "F1 Score", "Specificity"],
-                "Value %": [r["accuracy"], precision, recall, f1, specificity]
-            })
-            st.dataframe(
-                metrics_df.style.format({"Value %": "{:.2f}%"}),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            for name, val, color in [
-                ("Precision",   precision,      "#93c5fd"),
-                ("Recall",      recall,         "#6ee7b7"),
-                ("F1 Score",    f1,             "#fde68a"),
-                ("Specificity", specificity,    "#c4b5fd"),
-            ]:
-                st.markdown(f"""
-                <div style="margin-top:0.5rem;">
-                  <div style="display:flex;justify-content:space-between;font-size:0.8rem;">
-                    <span style="color:#94a3b8;">{name}</span>
-                    <span style="color:{color};font-weight:700;">{val}%</span>
-                  </div>
-                  <div class="metric-bar-bg">
-                    <div class="metric-bar-fill" style="width:{val}%;background:{color};"></div>
-                  </div>
-                </div>""", unsafe_allow_html=True)
-
-
-# ────────────────────────────────────────────────────
-# TAB 2 – VISUALIZATIONS (Spark-generated PNGs)
-# ────────────────────────────────────────────────────
-with tab2:
-    st.markdown('<div class="section-title">Charts Generated by loan_approval_spark.py</div>',
-                unsafe_allow_html=True)
-
-    if not os.path.exists(cm_path) or not os.path.exists(inc_path):
-        st.info("👈 Run the PySpark analysis first to generate the charts.")
-    else:
-        v1, v2 = st.columns(2)
-        with v1:
-            st.markdown("**Confusion Matrix Heatmap**")
-            st.image(Image.open(cm_path), use_container_width=True)
-            st.caption("confusion_matrix.png — generated by Matplotlib")
-
-        with v2:
-            st.markdown("**Approval Rate by Income Group**")
-            st.image(Image.open(inc_path), use_container_width=True)
-            st.caption("approval_by_income.png — generated by Matplotlib")
-
-    # ── Approval split pie (from dataset)
-    st.markdown('<div class="section-title">Dataset Overview Charts</div>', unsafe_allow_html=True)
+    # Feature Importance
+    st.markdown('<div class="section-title">Feature Importance</div>', unsafe_allow_html=True)
 
     try:
         import plotly.express as px
-        import plotly.graph_objects as go
+
+        imp = results["feature_importances"]
+        imp_df = pd.DataFrame({
+            "Feature": list(imp.keys()),
+            "Importance": [round(v * 100, 2) for v in imp.values()]
+        }).sort_values("Importance", ascending=True)
+
+        fig_imp = px.bar(
+            imp_df, x="Importance", y="Feature",
+            orientation="h",
+            color="Importance",
+            color_continuous_scale=["#1e3a5f", "#4f8ef7", "#34d399"],
+            text=imp_df["Importance"].apply(lambda x: f"{x:.1f}%")
+        )
+        fig_imp.update_layout(
+            paper_bgcolor="#1a2540", plot_bgcolor="#1a2540",
+            font_color="#e2e8f0",
+            showlegend=False, coloraxis_showscale=False,
+            xaxis_gridcolor="#243057", yaxis_gridcolor="#243057",
+            height=400, margin=dict(l=0, r=40, t=10, b=0)
+        )
+        fig_imp.update_traces(textposition="outside")
+        st.plotly_chart(fig_imp, use_container_width=True)
+    except ImportError:
+        st.info("Install plotly for interactive charts: `pip install plotly`")
+
+
+# ────────────────────────────────────────────────────
+# TAB 2 — VISUALIZATIONS
+# ────────────────────────────────────────────────────
+with tab2:
+    try:
+        import plotly.express as px
+
+        st.markdown('<div class="section-title">Dataset Visualizations</div>', unsafe_allow_html=True)
 
         d1, d2 = st.columns(2)
 
@@ -531,7 +507,8 @@ with tab2:
             fig2.update_traces(textposition="outside")
             st.plotly_chart(fig2, use_container_width=True)
 
-        # CIBIL score distribution by status
+        # CIBIL Score Distribution
+        st.markdown('<div class="section-title">CIBIL Score Distribution</div>', unsafe_allow_html=True)
         fig3 = px.histogram(
             df, x="cibil_score", color="loan_status",
             nbins=40, barmode="overlay",
@@ -547,17 +524,34 @@ with tab2:
         )
         st.plotly_chart(fig3, use_container_width=True)
 
+        # Loan Amount vs Income
+        st.markdown('<div class="section-title">Loan Amount vs Annual Income</div>', unsafe_allow_html=True)
+        fig4 = px.scatter(
+            df, x="income_annum", y="loan_amount",
+            color="loan_status",
+            color_discrete_map={"Approved": "#34d399", "Rejected": "#f87171"},
+            opacity=0.5,
+            title="Loan Amount vs Annual Income by Status",
+            labels={"income_annum": "Annual Income (₹)", "loan_amount": "Loan Amount (₹)"}
+        )
+        fig4.update_layout(
+            paper_bgcolor="#1a2540", plot_bgcolor="#1a2540",
+            font_color="#e2e8f0", title_font_size=14,
+            xaxis_gridcolor="#243057", yaxis_gridcolor="#243057",
+            legend=dict(font_color="#94a3b8")
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+
     except ImportError:
         st.warning("Install plotly for interactive charts: `pip install plotly`")
 
 
 # ────────────────────────────────────────────────────
-# TAB 3 – DATASET
+# TAB 3 — DATASET EXPLORER
 # ────────────────────────────────────────────────────
 with tab3:
     st.markdown('<div class="section-title">Dataset Preview</div>', unsafe_allow_html=True)
 
-    # Filters
     fc1, fc2, fc3 = st.columns(3)
     with fc1:
         edu_filter = st.selectbox("Education", ["All"] + sorted(df["education"].unique().tolist()))
@@ -567,9 +561,12 @@ with tab3:
         status_filter = st.selectbox("Loan Status", ["All", "Approved", "Rejected"])
 
     filtered = df.copy()
-    if edu_filter    != "All": filtered = filtered[filtered["education"]     == edu_filter]
-    if emp_filter    != "All": filtered = filtered[filtered["self_employed"] == emp_filter]
-    if status_filter != "All": filtered = filtered[filtered["loan_status"]   == status_filter]
+    if edu_filter != "All":
+        filtered = filtered[filtered["education"] == edu_filter]
+    if emp_filter != "All":
+        filtered = filtered[filtered["self_employed"] == emp_filter]
+    if status_filter != "All":
+        filtered = filtered[filtered["loan_status"] == status_filter]
 
     st.caption(f"Showing {len(filtered):,} of {len(df):,} records")
     st.dataframe(filtered, use_container_width=True, height=400)
@@ -583,47 +580,29 @@ with tab3:
 
 
 # ────────────────────────────────────────────────────
-# TAB 4 – TERMINAL OUTPUT
+# TAB 4 — PIPELINE
 # ────────────────────────────────────────────────────
 with tab4:
-    st.markdown('<div class="section-title">Raw Output from loan_approval_spark.py</div>',
+    st.markdown('<div class="section-title">PySpark ML Pipeline (from loan_approval_spark.py)</div>',
                 unsafe_allow_html=True)
-
-    if st.session_state.raw_output:
-        # Show only the lines printed by the script (after Spark logs)
-        lines = st.session_state.raw_output.strip().split("\n")
-        clean = [l for l in lines if not l.startswith("26/") and "WARN" not in l]
-        st.markdown(
-            f'<div class="terminal-box">{chr(10).join(clean)}</div>',
-            unsafe_allow_html=True
-        )
-    else:
-        st.info("👈 Run the analysis to see live terminal output here.")
-
-
-# ────────────────────────────────────────────────────
-# TAB 5 – PIPELINE
-# ────────────────────────────────────────────────────
-with tab5:
-    st.markdown('<div class="section-title">PySpark ML Pipeline</div>', unsafe_allow_html=True)
 
     steps = [
         ("1", "SparkSession", "Creates Spark session in local[*] mode (all CPU cores)", "#4f8ef7"),
-        ("2", "Read CSV",     "Loads dataset, strips whitespace, drops loan_id column", "#818cf8"),
-        ("3", "Imputer",      "Fills missing numerical values using median strategy across 9 columns", "#a78bfa"),
+        ("2", "Read CSV", "Loads dataset, strips whitespace, drops loan_id column", "#818cf8"),
+        ("3", "Imputer", "Fills missing numerical values using median strategy across 9 columns", "#a78bfa"),
         ("4", "StandardScaler", "Normalizes CIBIL score to mean=0, std=1 via z-score scaling", "#c084fc"),
         ("5", "StringIndexer", "Encodes education & self_employed to numeric; loan_status → label (Approved=1)", "#e879f9"),
         ("6", "VectorAssembler", "Merges all 11 feature columns into a single features vector", "#f472b6"),
         ("7", "DecisionTreeClassifier", "Trains Decision Tree (maxDepth=5, seed=42) on 80% training data", "#fb7185"),
-        ("8", "Evaluate",     "Computes accuracy using MulticlassClassificationEvaluator on 20% test set", "#f97316"),
+        ("8", "Evaluate", "Computes accuracy using MulticlassClassificationEvaluator on 20% test set", "#f97316"),
         ("9", "Confusion Matrix", "Counts TP/TN/FP/FN using PySpark agg + F.when; saves heatmap PNG", "#eab308"),
-        ("10","Income Analysis", "Groups by income tier, computes approval rate, saves bar chart PNG", "#84cc16"),
+        ("10", "Income Analysis", "Groups by income tier, computes approval rate, saves bar chart PNG", "#84cc16"),
     ]
 
     for num, name, desc, color in steps:
         st.markdown(f"""
-        <div style="display:flex; align-items:flex-start; gap:1rem; 
-                    background:#1a2540; border:1px solid #243057; 
+        <div style="display:flex; align-items:flex-start; gap:1rem;
+                    background:#1a2540; border:1px solid #243057;
                     border-radius:12px; padding:1rem 1.2rem; margin-bottom:0.6rem;">
           <div style="min-width:36px; height:36px; border-radius:10px; background:{color}22;
                       border:1px solid {color}66; color:{color}; font-weight:800;
@@ -636,7 +615,8 @@ with tab5:
           </div>
         </div>""", unsafe_allow_html=True)
 
-    st.markdown('<div class="section-title">Pipeline Stage Order</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Pipeline Code (from loan_approval_spark.py)</div>',
+                unsafe_allow_html=True)
     st.code("""Pipeline(stages=[
     imputer,           # Step 3 — fills NaN with median
     credit_assembler,  # Step 4a — wraps cibil_score in vector
@@ -652,6 +632,6 @@ with tab5:
 st.markdown("---")
 st.markdown("""
 <div style="text-align:center; color:#334155; font-size:0.8rem; padding:0.5rem 0 1rem;">
-  ⚡ Loan Approval Prediction &nbsp;·&nbsp; Apache Spark + PySpark ML &nbsp;·&nbsp; 
-  Results sourced from <code>loan_approval_spark.py</code> &nbsp;·&nbsp; 2026–27
+  ⚡ Loan Approval Prediction &nbsp;·&nbsp; Apache Spark + PySpark ML &nbsp;·&nbsp;
+  Pipeline replicated from <code>loan_approval_spark.py</code> &nbsp;·&nbsp; 2026–27
 </div>""", unsafe_allow_html=True)
